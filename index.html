@@ -178,7 +178,7 @@
 
     async function actualizarDashboard() {
       try {
-        const respuesta = await fetch(`http://127.0.0.1:5000/api/datos?dias=${diasPasado}&futuro=${mesesFuturo}&escenario=${escenarioActual}`);
+        const respuesta = await fetch(`https://monitor-soja-api.onrender.com/api/datos?dias=${diasPasado}&futuro=${mesesFuturo}&escenario=${escenarioActual}`);
         const datos = await respuesta.json();
 
         // Actualización de Tarjetas
