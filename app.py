@@ -136,72 +136,70 @@ def obtener_datos():
     meses_fut = int(request.args.get("futuro", 3))
     escenario = request.args.get("escenario", "neutral")
 
-    # Mapeo de meses de UI a Días de Proyección
-    dias_futuro = meses_fut * 30
-
-    # 1. Histórico SQLite + Intento de actualizar Spot en vivo
-    etiquetas_hist, valores_hist = consultar_historico_db(dias_hist)
-
-    # Intenta obtener la cotización oficial en tiempo real
-    precio_vivo = None
+    # 1. Scraping del precio Spot en vivo desde Pizarra BCR
+    precio_bcr = None
     try:
-        url = "https://www.matbarofex.com.ar/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=5)
+        url = "https://www.cac.bcr.com.ar/es/precios-de-pizarra"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(url, headers=headers, timeout=8)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
-            # Acá podrías parsear el precio exacto del HTML
+            for fila in soup.find_all(["tr", "div"]):
+                texto = fila.get_text()
+                if "Soja" in texto and "$" in texto:
+                    partes = texto.split("$")
+                    for p in partes[1:]:
+                        num_str = p.split()[0].replace(".", "").replace(",", ".")
+                        try:
+                            valor = float(num_str)
+                            if valor > 100000:
+                                precio_bcr = valor
+                                break
+                        except ValueError:
+                            continue
+                if precio_bcr:
+                    break
     except Exception as e:
-        print(f"Error al consultar spot en vivo: {e}")
+        print(f"Error al consultar BCR: {e}")
 
-    # Si encuentra precio en vivo lo usa; si no, recurre al último guardado en la DB
-    precio_spot = precio_vivo if precio_vivo else (valores_hist[-1] if valores_hist else 580000.0)
+    # 2. Si obtuvimos precio BCR, lo guardamos automáticamente en la DB local
+    if precio_bcr:
+        from datetime import date
+        fecha_hoy = date.today().strftime("%Y-%m-%d")
+        try:
+            conn = sqlite3.connect("soja_historico.db")
+            cursor = conn.cursor()
+            # Inserta o actualiza el precio del día
+            cursor.execute(
+                "INSERT OR REPLACE INTO cotizaciones (fecha, precio) VALUES (?, ?)",
+                (fecha_hoy, precio_bcr)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Error al guardar histórico BCR: {e}")
 
-    # 2. Proyección Diaria con Volatilidad Matba Rofex
+    # 3. Trae el historial actualizado desde la base de datos
+    etiquetas_hist, valores_hist = consultar_historico_db(dias_hist)
+    precio_spot = precio_bcr if precio_bcr else (valores_hist[-1] if valores_hist else 560000.0)
+
+    # 4. Proyección con el precio Spot de BCR
+    dias_futuro = meses_fut * 30
     etiquetas_fut, valores_fut = generar_proyeccion_diaria_matba(precio_spot, dias_futuro, escenario)
 
-    # 3. Datos estructurados para la tarjeta "Contexto del Mercado"
-    contextos = {
-        "neutral": {
-            "fuente": "Curva Futuros Matba Rofex",
-            "alerta": "Mercado alineado con tasas de pase implícitas.",
-            "detalle": "Tasa implícita promedio del 0,8% mensual. Presión bajista esperada por ingreso de cosecha gruesa (Abril-Junio) y recuperación hacia el empalme de fin de año."
-        },
-        "alcista": {
-            "fuente": "Escenario Alcista (Seca / Demanda)",
-            "alerta": "Prima por riesgo alta en contratos a término.",
-            "detalle": "Proyección impulsada por estrés hídrico en regiones productoras y fuerte demanda de exportación. Se proyecta retención de grano y suba de basis."
-        },
-        "bajista": {
-            "fuente": "Escenario Bajista (Oferta Récord)",
-            "alerta": "Sesgo bajista por volumen de liquidación.",
-            "detalle": "Presión de oferta masiva proyectada por cosecha récord regional y desaceleración de la demanda externa. La curva descuenta mayores descuentos en cosecha."
-        }
+    # 5. Tarjeta informativa
+    contexto = {
+        "fuente": "Pizarra BCR (Bolsa de Comercio de Rosario)",
+        "alerta": "Mercado físico oficial de la Cámara Arbitral.",
+        "detalle": f"Cotización spot extraída de Pizarra BCR: ${precio_spot:,.2f} $/Tn."
     }
 
-    ctx = contextos.get(escenario, contextos["neutral"])
-
-    # Cálculo de métrica clave: Variación % proyectada al final del período
-    precio_final = valores_fut[-1]
-    var_porcentaje = round(((precio_final - precio_spot) / precio_spot) * 100, 2)
-
     return jsonify({
-        "mercado": "Rosario (BCR / Matba Rofex)",
-        "precio_pizarra": precio_spot,
-        "historico": {
-            "etiquetas": etiquetas_hist,
-            "valores": valores_hist
-        },
-        "proyeccion": {
-            "etiquetas": etiquetas_fut,
-            "valores": valores_fut
-        },
-        "fuente_proyeccion": ctx["fuente"],
-        "alerta": ctx["alerta"],
-        "contexto_detalle": ctx["detalle"],
-        "precio_objetivo": precio_final,
-        "var_proyectada": var_porcentaje
+        "historico": {"fechas": etiquetas_hist, "precios": valores_hist},
+        "proyeccion": {"fechas": etiquetas_fut, "precios": valores_fut},
+        "spot_actual": precio_spot,
+        "escenario": escenario,
+        "contexto": contexto
     })
-
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
